@@ -39,6 +39,12 @@ def run_file(path, run_interpreter=True):
         # ========= CHECKER =========
         checker = Checker()
         checker.visit(ast)
+                
+        # 🔥 IMPRIMIR AST YA VALIDADO
+        from rich.pretty import pprint
+
+        print("\n[cyan]AST después del checker:[/cyan]")
+        pprint(ast, expand_all=True)
 
         if checker.errors:
             for err in checker.errors:

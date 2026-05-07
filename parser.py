@@ -219,12 +219,6 @@ def parse(source):
 
     # ================= STATEMENTS =================
 
-  
-
-
-
-
-
     def parse_block():
         _, ln = consume("{")
         stmts = []
