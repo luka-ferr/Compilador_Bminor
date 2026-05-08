@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 from multimethod import multimeta
-from rich import print
+from rich import print as rprint
 
 from model import *
 
@@ -14,11 +14,10 @@ from model import *
 
 Instruction = tuple
 
+
 class Visitor(metaclass=multimeta):
     """
     Clase base Visitor.
-
-    Permite usar múltiples firmas del método visit().
     """
     pass
 
@@ -26,10 +25,7 @@ class Visitor(metaclass=multimeta):
 @dataclass
 class Storage:
     """
-    Describe dónde vive un símbolo durante la generación de IR.
-
-    El objetivo es que el estudiante tenga una estructura simple para
-    consultar tipo y categoría del símbolo (global, parámetro, constante).
+    Describe dónde vive un símbolo en el IR.
     """
     name: str
     ty: Type
@@ -53,82 +49,66 @@ class IRProgram:
 
     def format(self) -> str:
         out: list[str] = []
+
         if self.globals:
             out.append("# Globals")
+
             for inst in self.globals:
                 out.append(format_instruction(inst))
+
             out.append("")
 
         for fn in self.functions:
-            params = ", ".join(f"{name}:{ty}" for name, ty in fn.params)
-            out.append(f"function {fn.name}({params}) -> {fn.return_type}")
+            params = ", ".join(
+                f"{name}:{ty}" for name, ty in fn.params
+            )
+
+            out.append(
+                f"function {fn.name}({params}) -> {fn.return_type}"
+            )
+
             for inst in fn.instructions:
                 out.append(f"  {format_instruction(inst)}")
+
             out.append("")
+
         return "\n".join(out).rstrip()
 
 
 # ===================================================
-# Pretty printing
+# Pretty printer
 # ===================================================
-
 
 def format_instruction(inst: Instruction) -> str:
     op = inst[0]
+
     if len(inst) == 1:
         return op
-    args = ", ".join(
-        repr(x) if isinstance(x, str) and x.startswith("L") else str(x)
-        for x in inst[1:]
-    )
+
+    args = ", ".join(str(x) for x in inst[1:])
     return f"{op} {args}"
 
 
 # ===================================================
-# Generator
+# IR Generator
 # ===================================================
 
-
 class IRCodeGen(Visitor):
-    """
-    Plantilla base para el proyecto de IRCode.
-
-    Esta versión deja aproximadamente la mitad del trabajo resuelto:
-
-    Ya implementado:
-    - estructura del programa IR
-    - manejo de temporales y labels
-    - scopes y lookup de símbolos
-    - declaración de variables y constantes
-    - carga de literales enteros, booleanos y chars
-    - lectura de variables (VarLoc)
-    - impresión simple
-    - retorno simple
-    - parte de la selección de opcodes
-
-    Pendiente para estudiantes:
-    - completar BinOp
-    - completar UnaryOp
-    - completar Assignment compuesto
-    - completar IfStmt / WhileStmt / ForStmt
-    - completar FuncCall
-    - arreglos y strings
-    - conversiones adicionales y mejoras del IR
-
-    Sugerencia pedagógica:
-    1. Hacer primero expresiones aritméticas.
-    2. Luego comparaciones.
-    3. Después control de flujo.
-    4. Finalmente llamadas, arreglos y extensiones.
-    """
 
     def __init__(self):
         self.program = IRProgram()
+
         self.current_function: Optional[IRFunction] = None
         self.current_return_type: Type = VoidType
+
         self.temp_count = 0
         self.label_count = 0
+
         self.scopes: list[dict[str, Storage]] = []
+
+    # -------------------------------------------------
+    # entrypoint
+    # -------------------------------------------------
 
     @classmethod
     def generate(cls, node: Program) -> IRProgram:
@@ -137,355 +117,498 @@ class IRCodeGen(Visitor):
         return gen.program
 
     # -------------------------------------------------
-    # helpers básicos
+    # helpers
     # -------------------------------------------------
 
     def new_temp(self) -> str:
         self.temp_count += 1
         return f"R{self.temp_count}"
 
-    def new_label(self, prefix: str = "L") -> str:
+    def new_label(self, prefix="L") -> str:
         self.label_count += 1
         return f"{prefix}{self.label_count}"
 
-    def emit(self, *inst) -> None:
+    def emit(self, *inst):
         inst = tuple(inst)
+
         if self.current_function is None:
             self.program.globals.append(inst)
         else:
             self.current_function.instructions.append(inst)
 
-    def push_scope(self) -> None:
+    # -------------------------------------------------
+    # scopes
+    # -------------------------------------------------
+
+    def push_scope(self):
         self.scopes.append({})
 
-    def pop_scope(self) -> None:
+    def pop_scope(self):
         self.scopes.pop()
 
-    def bind(self, storage: Storage) -> None:
+    def bind(self, storage: Storage):
         if not self.scopes:
             self.push_scope()
+
         self.scopes[-1][storage.name] = storage
 
     def lookup(self, name: str) -> Storage:
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
-        raise NameError(f"Nombre no resuelto en IRCodeGen: {name}")
+
+        raise NameError(f"Nombre no definido: {name}")
+
+    # -------------------------------------------------
+    # tipos
+    # -------------------------------------------------
 
     def infer_type(self, node: Optional[Node]) -> Type:
-        """
-        Inferencia mínima para que el generador pueda escoger opcodes.
 
-        Nota: aquí se asume que el checker semántico ya pasó antes.
-        """
         if node is None:
-            return VOID
+            return VoidType
 
         ty = getattr(node, "type", None)
+
         if isinstance(ty, Type):
             return ty
 
-        if isinstance(node, IntegerLiteral):
-            return INT
-        if isinstance(node, BooleanLiteral):
-            return BOOL
-        if isinstance(node, CharLiteral):
-            return CHAR
-        if isinstance(node, StringLiteral):
-            return STRING
-        if isinstance(node, (VarDecl, ConstDecl, Param)):
+        if isinstance(node, Number):
+            return IntegerType
+
+        if isinstance(node, Boolean):
+            return BooleanType
+
+        if isinstance(node, Char):
+            return CharType
+
+        if isinstance(node, String):
+            return StringType
+
+        if isinstance(node, (VarDecl, Param)):
             return node.type
 
-        # Valor por defecto conservador para no bloquear pruebas tempranas.
-        return INT
+        return IntegerType
+
+    # -------------------------------------------------
+    # opcodes
+    # -------------------------------------------------
 
     def type_suffix(self, ty: Type) -> str:
-        if isinstance(ty, (IntegerType, BooleanType)):
+
+        if ty in (IntegerType, BooleanType):
             return "I"
-        if isinstance(ty, CharType):
+
+        if ty == CharType:
             return "B"
-        if isinstance(ty, VoidType):
+
+        if ty == VoidType:
             return "V"
-        raise NotImplementedError(f"Tipo aún no soportado en esta plantilla: {ty}")
+        
+        # 🔥 arrays
+        if isinstance(ty, ArrayType):
 
-    def move_opcode(self, ty: Type) -> str:
-        return f"MOV{self.type_suffix(ty)}"
+            # array of integer
+            if ty.base == IntegerType:
+                return "AI"
 
-    def load_opcode(self, ty: Type) -> str:
+            # array of char
+            if ty.base == CharType:
+                return "AB"
+
+        raise NotImplementedError(f"Tipo no soportado: {ty}")
+
+    def load_opcode(self, ty: Type):
         return f"LOAD{self.type_suffix(ty)}"
 
-    def store_opcode(self, ty: Type) -> str:
+    def store_opcode(self, ty: Type):
         return f"STORE{self.type_suffix(ty)}"
 
-    def alloc_opcode(self, ty: Type) -> str:
+    def alloc_opcode(self, ty: Type):
         return f"ALLOC{self.type_suffix(ty)}"
 
-    def var_opcode(self, ty: Type) -> str:
+    def var_opcode(self, ty: Type):
         return f"VAR{self.type_suffix(ty)}"
 
-    def print_opcode(self, ty: Type) -> str:
+    def print_opcode(self, ty: Type):
         return f"PRINT{self.type_suffix(ty)}"
 
-    def cmp_opcode(self, ty: Type) -> str:
-        return f"CMP{self.type_suffix(ty)}"
-
     # -------------------------------------------------
-    # opcodes auxiliares
+    # arithmetic
     # -------------------------------------------------
 
-    def binary_arith_opcode(self, oper: str, ty: Type) -> str:
+    def binary_arith_opcode(self, oper: str, ty: Type):
+
         suffix = self.type_suffix(ty)
+
         table = {
             "+": f"ADD{suffix}",
             "-": f"SUB{suffix}",
             "*": f"MUL{suffix}",
             "/": f"DIV{suffix}",
         }
+
         if oper not in table:
-            raise NotImplementedError(f"Aritmética no soportada: {oper}")
+            raise NotImplementedError(
+                f"Operador no soportado: {oper}"
+            )
+
         return table[oper]
 
-    def binary_bit_opcode(self, oper: str, ty: Type) -> str:
-        table = {
-            "&": "AND",
-            "|": "OR",
-            "^": "XOR",
-        }
-        if oper not in table:
-            raise NotImplementedError(f"Bitwise no soportado: {oper}")
-        return table[oper]
-
-    # -------------------------------------------------
-    # programa y declaraciones
-    # -------------------------------------------------
+    # =================================================
+    # PROGRAM
+    # =================================================
 
     def visit(self, node: Program):
+
         self.push_scope()
 
-        # Primera pasada: registrar nombres globales.
-        for decl in node.decls:
-            if isinstance(decl, (VarDecl, ConstDecl)):
+        # Primera pasada
+        for decl in node.declarations:
+
+            if isinstance(decl, VarDecl):
+
                 self.bind(
                     Storage(
                         decl.name,
                         decl.type,
                         is_global=True,
-                        is_const=isinstance(decl, ConstDecl),
                     )
                 )
-            elif isinstance(decl, FuncDecl):
-                self.bind(Storage(decl.name, decl.type, is_global=True))
 
-        # Segunda pasada: generar IR real.
-        for decl in node.decls:
+            elif isinstance(decl, Function):
+
+                self.bind(
+                    Storage(
+                        decl.name,
+                        FunctionType(
+                            decl.return_type,
+                            [p.type for p in decl.params]
+                        ),
+                        is_global=True,
+                    )
+                )
+
+        # Segunda pasada
+        for decl in node.declarations:
             self.visit(decl)
 
         self.pop_scope()
+
         return self.program
 
+    # =================================================
+    # DECLARATIONS
+    # =================================================
+
     def visit(self, node: VarDecl):
+
         if self.current_function is None:
-            self.emit(self.var_opcode(node.type), node.name)
+
+            self.emit(
+                self.var_opcode(node.type),
+                node.name
+            )
+
             if node.value is not None:
+
                 src = self.visit(node.value)
-                self.emit(self.store_opcode(node.type), src, node.name)
+
+                self.emit(
+                    self.store_opcode(node.type),
+                    src,
+                    node.name
+                )
+
             return
 
-        self.bind(Storage(node.name, node.type, is_const=not node.mutable))
-        self.emit(self.alloc_opcode(node.type), node.name)
+        self.bind(
+            Storage(
+                node.name,
+                node.type,
+            )
+        )
+
+        self.emit(
+            self.alloc_opcode(node.type),
+            node.name
+        )
+
         if node.value is not None:
+
             src = self.visit(node.value)
-            self.emit(self.store_opcode(node.type), src, node.name)
 
-    def visit(self, node: ConstDecl):
-        if self.current_function is None:
-            self.emit(self.var_opcode(node.type), node.name)
-            src = self.visit(node.value)
-            self.emit(self.store_opcode(node.type), src, node.name)
-            return
+            self.emit(
+                self.store_opcode(node.type),
+                src,
+                node.name
+            )
 
-        self.bind(Storage(node.name, node.type, is_const=True))
-        self.emit(self.alloc_opcode(node.type), node.name)
-        src = self.visit(node.value)
-        self.emit(self.store_opcode(node.type), src, node.name)
+    def visit(self, node: Function):
 
-    def visit(self, node: FuncDecl):
         prev_fn = self.current_function
         prev_ret = self.current_return_type
 
         fn = IRFunction(
             name=node.name,
-            params=[(p.name, p.type) for p in node.parms.params],
-            return_type=node.type,
+            params=[(p.name, p.type) for p in node.params],
+            return_type=node.return_type,
         )
+
         self.program.functions.append(fn)
+
         self.current_function = fn
-        self.current_return_type = node.type
+        self.current_return_type = node.return_type
 
         self.push_scope()
-        for p in node.parms.params:
-            self.bind(Storage(p.name, p.type, is_param=True))
-            self.emit(self.alloc_opcode(p.type), p.name)
 
-        self.visit(node.body)
+        # parámetros
+        for p in node.params:
 
-        # Soporte mínimo para funciones void.
-        if isinstance(node.type, VoidType):
-            if not fn.instructions or fn.instructions[-1][0] != "RET":
+            self.bind(
+                Storage(
+                    p.name,
+                    p.type,
+                    is_param=True
+                )
+            )
+
+            self.emit(
+                self.alloc_opcode(p.type),
+                p.name
+            )
+
+        # cuerpo
+        if isinstance(node.body, Block):
+            self.visit(node.body)
+
+        elif isinstance(node.body, list):
+            for stmt in node.body:
+                self.visit(stmt)
+
+        # return void automático
+        if node.return_type == VoidType:
+
+            if (
+                not fn.instructions
+                or fn.instructions[-1][0] != "RET"
+            ):
                 self.emit("RET")
 
         self.pop_scope()
+
         self.current_function = prev_fn
         self.current_return_type = prev_ret
 
+    # =================================================
+    # BLOCK
+    # =================================================
+
     def visit(self, node: Block):
+
         self.push_scope()
-        for stmt in node.stmts:
+
+        for stmt in node.statements:
             self.visit(stmt)
+
         self.pop_scope()
 
-    def visit(self, node: ParamList):
-        return None
-
-    def visit(self, node: Param):
-        return None
-
-    # -------------------------------------------------
-    # statements
-    # -------------------------------------------------
+    # =================================================
+    # STATEMENTS
+    # =================================================
 
     def visit(self, node: Assignment):
-        """
-        Implementación parcial.
 
-        Ya resuelto:
-        - asignación simple a variables: x = expr
+        if not isinstance(node.target, Identifier):
 
-        Ejercicio para estudiantes:
-        - x += expr, x -= expr, ...
-        - asignación a ArrayLoc
-        - impedir escritura en constantes (si desean reforzarlo aquí)
-        """
-        if not isinstance(node.loc, VarLoc):
             raise NotImplementedError(
-                "Starter: Assignment solo soporta VarLoc por ahora"
+                "Assignment solo soporta Identifier"
             )
 
-        storage = self.lookup(node.loc.name)
+        storage = self.lookup(node.target.name)
 
-        if node.oper == "=":
-            src = self.visit(node.expr)
-            self.emit(self.store_opcode(storage.ty), src, storage.name)
-            return
+        src = self.visit(node.value)
 
-        raise NotImplementedError(
-            "TODO estudiante: implementar asignaciones compuestas (+=, -=, ... )"
+        self.emit(
+            self.store_opcode(storage.ty),
+            src,
+            storage.name
         )
 
-    def visit(self, node: PrintStmt):
-        reg = self.visit(node.expr)
-        ty = self.infer_type(node.expr)
-        self.emit(self.print_opcode(ty), reg)
+    def visit(self, node: Print):
 
-    def visit(self, node: IfStmt):
-        raise NotImplementedError(
-            "TODO estudiante: generar labels y branches para IfStmt"
-        )
+        for expr in node.args:
 
-    def visit(self, node: WhileStmt):
-        raise NotImplementedError(
-            "TODO estudiante: generar labels y branches para WhileStmt"
-        )
+            reg = self.visit(expr)
 
-    def visit(self, node: ForStmt):
-        raise NotImplementedError(
-            "TODO estudiante: generar labels y branches para ForStmt"
-        )
+            ty = self.infer_type(expr)
 
-    def visit(self, node: ReturnStmt):
-        if node.expr is None:
+            self.emit(
+                self.print_opcode(ty),
+                reg
+            )
+
+    def visit(self, node: Return):
+
+        if node.value is None:
             self.emit("RET")
             return
 
-        reg = self.visit(node.expr)
+        reg = self.visit(node.value)
+
         self.emit("RET", reg)
 
-    # -------------------------------------------------
-    # expressions
-    # -------------------------------------------------
+    def visit(self, node: If):
+        raise NotImplementedError("If no implementado")
 
-    def visit(self, node: VarLoc):
+    def visit(self, node: While):
+        raise NotImplementedError("While no implementado")
+
+    def visit(self, node: For):
+        raise NotImplementedError("For no implementado")
+
+    # =================================================
+    # EXPRESSIONS
+    # =================================================
+
+    def visit(self, node: Identifier):
+
         storage = self.lookup(node.name)
+
         tmp = self.new_temp()
-        self.emit(self.load_opcode(storage.ty), storage.name, tmp)
+
+        self.emit(
+            self.load_opcode(storage.ty),
+            storage.name,
+            tmp
+        )
+
         return tmp
 
-    def visit(self, node: ArrayLoc):
-        raise NotImplementedError(
-            "TODO estudiante: implementar acceso a arreglos"
-        )
+    def visit(self, node: BinaryOp):
 
-    def visit(self, node: FuncCall):
-        raise NotImplementedError(
-            "TODO estudiante: implementar evaluación de argumentos y CALL"
-        )
-
-    def visit(self, node: BinOp):
-        """
-        Implementación al 50%.
-
-        Ya resuelto:
-        - esqueleto general
-        - aritmética básica + - * /
-
-        Pendiente:
-        - comparaciones
-        - booleanos lógicos
-        - operaciones bit a bit
-        - cortocircuito real para && y ||
-        """
         left_reg = self.visit(node.left)
         right_reg = self.visit(node.right)
+
         left_ty = self.infer_type(node.left)
+
         out = self.new_temp()
 
-        if node.oper in {"+", "-", "*", "/"}:
-            opcode = self.binary_arith_opcode(node.oper, left_ty)
-            self.emit(opcode, left_reg, right_reg, out)
+        if node.op in {"+", "-", "*", "/"}:
+
+            opcode = self.binary_arith_opcode(
+                node.op,
+                left_ty
+            )
+
+            self.emit(
+                opcode,
+                left_reg,
+                right_reg,
+                out
+            )
+
             return out
 
         raise NotImplementedError(
-            f"TODO estudiante: completar BinOp para operador {node.oper!r}"
+            f"Operador no implementado: {node.op}"
         )
 
     def visit(self, node: UnaryOp):
-        raise NotImplementedError(
-            "TODO estudiante: implementar UnaryOp (+, -, !)"
+        raise NotImplementedError("UnaryOp no implementado")
+
+    def visit(self, node: Call):
+
+        # Evaluar argumentos
+        arg_regs = []
+
+        for arg in node.args:
+            reg = self.visit(arg)
+            arg_regs.append(reg)
+
+        # Temporal para valor retorno
+        result = self.new_temp()
+
+        # Generar instrucción CALL
+        self.emit("CALL", node.name, *arg_regs, result)
+
+        return result
+
+    def visit(self, node: ArrayAccess):
+
+        # Obtener nombre del arreglo
+        if not isinstance(node.array, Identifier):
+            raise NotImplementedError(
+                "Solo arrays simples soportados"
+            )
+
+        storage = self.lookup(node.array.name)
+
+        # Evaluar índice
+        index_reg = self.visit(node.index)
+
+        # Registro destino
+        out = self.new_temp()
+
+        # LOADARRAY
+        self.emit(
+            "LOADARRAY",
+            storage.name,
+            index_reg,
+            out
         )
 
-    def visit(self, node: IntegerType):
-        tmp = self.new_temp()
-        self.emit("MOVI", int(node.value), tmp)
-        return tmp
+        return out
+    # =================================================
+    # LITERALS
+    # =================================================
 
-    def visit(self, node: BooleanType):
-        tmp = self.new_temp()
-        self.emit("MOVI", 1 if node.value else 0, tmp)
-        return tmp
+    def visit(self, node: Number):
 
-    def visit(self, node: CharType):
         tmp = self.new_temp()
-        value = ord(node.value) if isinstance(node.value, str) else int(node.value)
-        self.emit("MOVB", value, tmp)
-        return tmp
 
-    def visit(self, node: StringType):
-        raise NotImplementedError(
-            "TODO estudiante: decidir representación IR para strings"
+        self.emit(
+            "MOVI",
+            int(node.value),
+            tmp
         )
 
-    def visit(self, node: ExprList):
-        return [self.visit(expr) for expr in node.exprs]
+        return tmp
+
+    def visit(self, node: Boolean):
+
+        tmp = self.new_temp()
+
+        self.emit(
+            "MOVI",
+            1 if node.value else 0,
+            tmp
+        )
+
+        return tmp
+
+    def visit(self, node: Char):
+
+        tmp = self.new_temp()
+
+        value = (
+            ord(node.value)
+            if isinstance(node.value, str)
+            else int(node.value)
+        )
+
+        self.emit(
+            "MOVB",
+            value,
+            tmp
+        )
+
+        return tmp
+
+    def visit(self, node: String):
+        raise NotImplementedError(
+            "Strings no implementados"
+        )
 
 
 # ===================================================
@@ -493,26 +616,34 @@ class IRCodeGen(Visitor):
 # ===================================================
 
 if __name__ == "__main__":
-    # Demo pequeña para que los estudiantes prueben la plantilla.
- ast = Program([
-    Function(
-        name="main",
-        return_type=VoidType,
-        params=[],
-        body=[
-            VarDecl(
-                "x",
-                IntegerType,
-                BinaryOp(
-                    "+",
-                    Number(2),
-                    BinaryOp("*", Number(3), Number(4))
-                )
-            ),
-            Print([Identifier("x")])
-        ]
-    )
-])
-    
-ir = IRCodeGen.generate(ast)
-print(ir.format())
+
+    ast = Program([
+        Function(
+            name="main",
+            return_type=VoidType,
+            params=[],
+            body=[
+                VarDecl(
+                    "x",
+                    IntegerType,
+                    BinaryOp(
+                        "+",
+                        Number(2),
+                        BinaryOp(
+                            "*",
+                            Number(3),
+                            Number(4)
+                        )
+                    )
+                ),
+
+                Print([
+                    Identifier("x")
+                ])
+            ]
+        )
+    ])
+
+    ir = IRCodeGen.generate(ast)
+
+    rprint(ir.format())

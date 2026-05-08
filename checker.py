@@ -321,7 +321,7 @@ class Checker(Visitor):
             return None
 
         return arr_type.base
-    
+
     def visit_ArrayLiteral(self, node):
         if not node.elements:
             return None

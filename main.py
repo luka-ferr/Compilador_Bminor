@@ -5,6 +5,7 @@ from lexer import tokenize
 from parser import parse
 from checker import Checker
 from rich import print
+from ircode_starter import IRCodeGen
 
 # opcional
 try:
@@ -39,7 +40,7 @@ def run_file(path, run_interpreter=True):
         # ========= CHECKER =========
         checker = Checker()
         checker.visit(ast)
-                
+
         # 🔥 IMPRIMIR AST YA VALIDADO
         from rich.pretty import pprint
 
@@ -53,6 +54,12 @@ def run_file(path, run_interpreter=True):
             return False
 
         print("\n[green]Semantic check: success[/green]")
+
+        # ========= IR CODE =========
+        ir = IRCodeGen.generate(ast)
+
+        print("\n[yellow]Código Intermedio (IR):[/yellow]")
+        print(ir.format())
 
         # ========= INTERPRETER =========
         if run_interpreter and HAS_INTERPRETER:
