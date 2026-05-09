@@ -5,7 +5,7 @@ from lexer import tokenize
 from parser import parse
 from checker import Checker
 from rich import print
-from ircode_starter import IRCodeGen
+from ircode import IRCodeGen
 
 # opcional
 try:
@@ -29,7 +29,7 @@ def read_file(path):
 # ================= EJECUTAR 1 ARCHIVO =================
 
 def run_file(path, run_interpreter=True):
-    print(f"\n📄 Ejecutando: {path}")
+    print(f"\n>>> Ejecutando: {path}")
 
     try:
         source = read_file(path)
@@ -41,24 +41,23 @@ def run_file(path, run_interpreter=True):
         checker = Checker()
         checker.visit(ast)
 
-        # 🔥 IMPRIMIR AST YA VALIDADO
-        from rich.pretty import pprint
-
-        print("\n[cyan]AST después del checker:[/cyan]")
-        pprint(ast, expand_all=True)
+        # IMPRIMIR AST YA VALIDADO
+        print("\n=== AST después del checker ===")
+        from pprint import pprint
+        pprint(ast.__dict__, depth=2)
 
         if checker.errors:
             for err in checker.errors:
-                print(err)   # 🔥 sin duplicar "error:"
-            print("\n[red]Semantic check: failed[/red]")
+                print(err)
+            print("\nSemantic check: FAILED")
             return False
 
-        print("\n[green]Semantic check: success[/green]")
+        print("\nSemantic check: SUCCESS")
 
         # ========= IR CODE =========
         ir = IRCodeGen.generate(ast)
 
-        print("\n[yellow]Código Intermedio (IR):[/yellow]")
+        print("\n=== Codigo Intermedio (IR) ===")
         print(ir.format())
 
         # ========= INTERPRETER =========

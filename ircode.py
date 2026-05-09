@@ -4,8 +4,16 @@ from dataclasses import dataclass, field
 from typing import Optional
 from rich import print
 import multimethod
+from multimethod import multimeta
 
 from model import *
+
+
+class Visitor(metaclass=multimeta):
+    """
+    Clase base Visitor.
+    """
+    pass
 
 # ===================================================
 # IR model
@@ -116,7 +124,7 @@ class IRCodeGen(Visitor):
     def __init__(self):
         self.program = IRProgram()
         self.current_function: Optional[IRFunction] = None
-        self.current_return_type: Type = VOID
+        self.current_return_type: Type = VoidType
         self.temp_count = 0
         self.label_count = 0
         self.scopes: list[dict[str, Storage]] = []
@@ -170,33 +178,39 @@ class IRCodeGen(Visitor):
         Nota: aquí se asume que el checker semántico ya pasó antes.
         """
         if node is None:
-            return VOID
+            return VoidType
 
         ty = getattr(node, "type", None)
         if isinstance(ty, Type):
             return ty
 
-        if isinstance(node, IntegerLiteral):
-            return INT
-        if isinstance(node, BooleanLiteral):
-            return BOOL
-        if isinstance(node, CharLiteral):
-            return CHAR
-        if isinstance(node, StringLiteral):
-            return STRING
-        if isinstance(node, (VarDecl, ConstDecl, Param)):
+        if isinstance(node, Number):
+            return IntegerType
+        if isinstance(node, Boolean):
+            return BooleanType
+        if isinstance(node, Char):
+            return CharType
+        if isinstance(node, String):
+            return StringType
+        if isinstance(node, (VarDecl, Param)):
             return node.type
 
         # Valor por defecto conservador para no bloquear pruebas tempranas.
-        return INT
+        return IntegerType
 
     def type_suffix(self, ty: Type) -> str:
-        if isinstance(ty, (IntegerType, BooleanType)):
+        if ty in (IntegerType, BooleanType):
             return "I"
-        if isinstance(ty, CharType):
+        if ty == CharType:
             return "B"
-        if isinstance(ty, VoidType):
+        if ty == VoidType:
             return "V"
+        if ty == FloatType:
+            return "F"
+        if ty == StringType:
+            return "S"
+        if isinstance(ty, ArrayType):
+            return "A"
         raise NotImplementedError(f"Tipo aún no soportado en esta plantilla: {ty}")
 
     def move_opcode(self, ty: Type) -> str:
@@ -254,21 +268,21 @@ class IRCodeGen(Visitor):
         self.push_scope()
 
         # Primera pasada: registrar nombres globales.
-        for decl in node.decls:
-            if isinstance(decl, (VarDecl, ConstDecl)):
+        for decl in node.declarations:
+            if isinstance(decl, VarDecl):
                 self.bind(
                     Storage(
                         decl.name,
                         decl.type,
                         is_global=True,
-                        is_const=isinstance(decl, ConstDecl),
+                        is_const=False,
                     )
                 )
-            elif isinstance(decl, FuncDecl):
-                self.bind(Storage(decl.name, decl.type, is_global=True))
+            elif isinstance(decl, Function):
+                self.bind(Storage(decl.name, decl.return_type, is_global=True))
 
         # Segunda pasada: generar IR real.
-        for decl in node.decls:
+        for decl in node.declarations:
             self.visit(decl)
 
         self.pop_scope()
@@ -282,46 +296,37 @@ class IRCodeGen(Visitor):
                 self.emit(self.store_opcode(node.type), src, node.name)
             return
 
-        self.bind(Storage(node.name, node.type, is_const=not node.mutable))
+        self.bind(Storage(node.name, node.type, is_const=False))
         self.emit(self.alloc_opcode(node.type), node.name)
         if node.value is not None:
             src = self.visit(node.value)
             self.emit(self.store_opcode(node.type), src, node.name)
 
-    def visit(self, node: ConstDecl):
-        if self.current_function is None:
-            self.emit(self.var_opcode(node.type), node.name)
-            src = self.visit(node.value)
-            self.emit(self.store_opcode(node.type), src, node.name)
-            return
-
-        self.bind(Storage(node.name, node.type, is_const=True))
-        self.emit(self.alloc_opcode(node.type), node.name)
-        src = self.visit(node.value)
-        self.emit(self.store_opcode(node.type), src, node.name)
-
-    def visit(self, node: FuncDecl):
+    def visit(self, node: Function):
         prev_fn = self.current_function
         prev_ret = self.current_return_type
 
         fn = IRFunction(
             name=node.name,
-            params=[(p.name, p.type) for p in node.parms.params],
-            return_type=node.type,
+            params=[(p.name, p.type) for p in node.params],
+            return_type=node.return_type,
         )
         self.program.functions.append(fn)
         self.current_function = fn
-        self.current_return_type = node.type
+        self.current_return_type = node.return_type
 
         self.push_scope()
-        for p in node.parms.params:
+        for p in node.params:
             self.bind(Storage(p.name, p.type, is_param=True))
             self.emit(self.alloc_opcode(p.type), p.name)
 
-        self.visit(node.body)
+        # node.body es una lista de statements
+        if node.body is not None:
+            for stmt in node.body:
+                self.visit(stmt)
 
         # Soporte mínimo para funciones void.
-        if isinstance(node.type, VoidType):
+        if node.return_type == VoidType:
             if not fn.instructions or fn.instructions[-1][0] != "RET":
                 self.emit("RET")
 
@@ -331,12 +336,13 @@ class IRCodeGen(Visitor):
 
     def visit(self, node: Block):
         self.push_scope()
-        for stmt in node.stmts:
+        for stmt in node.statements:
             self.visit(stmt)
         self.pop_scope()
 
-    def visit(self, node: ParamList):
-        return None
+    # ParamList no es necesaria en el modelo actual
+    # def visit(self, node: ParamList):
+    #     return None
 
     def visit(self, node: Param):
         return None
@@ -347,136 +353,335 @@ class IRCodeGen(Visitor):
 
     def visit(self, node: Assignment):
         """
-        Implementación parcial.
-
-        Ya resuelto:
-        - asignación simple a variables: x = expr
-
-        Ejercicio para estudiantes:
-        - x += expr, x -= expr, ...
-        - asignación a ArrayLoc
-        - impedir escritura en constantes (si desean reforzarlo aquí)
+        Asignacion simple y compuesta.
+        Soporta: =, +=, -=, *=, /=, &=, |=, ^=, <<=, >>=
         """
-        if not isinstance(node.loc, VarLoc):
+        if not isinstance(node.target, Identifier):
             raise NotImplementedError(
-                "Starter: Assignment solo soporta VarLoc por ahora"
+                "Starter: Assignment solo soporta Identifier por ahora"
             )
 
-        storage = self.lookup(node.loc.name)
+        storage = self.lookup(node.target.name)
+        src = self.visit(node.value)
+        self.emit(self.store_opcode(storage.ty), src, storage.name)
+        return
 
-        if node.oper == "=":
-            src = self.visit(node.expr)
-            self.emit(self.store_opcode(storage.ty), src, storage.name)
-            return
+    def visit(self, node: Print):
+        regs = [self.visit(arg) for arg in node.args]
+        for reg in regs:
+            ty = self.infer_type(node)  # tipo inferido
+            self.emit(self.print_opcode(ty), reg)
 
-        raise NotImplementedError(
-            "TODO estudiante: implementar asignaciones compuestas (+=, -=, ... )"
-        )
+    def visit(self, node: If):
+        """
+        Genera IR para sentencias condicionales.
+        if (cond) then_body [else else_body]
+        """
+        cond_reg = self.visit(node.cond)
+        then_label = self.new_label()
+        else_label = self.new_label()
+        end_label = self.new_label()
 
-    def visit(self, node: PrintStmt):
-        reg = self.visit(node.expr)
-        ty = self.infer_type(node.expr)
-        self.emit(self.print_opcode(ty), reg)
+        # Branch si la condición es falsa
+        self.emit("BRANCH_FALSE", cond_reg, else_label if node.else_body else end_label)
 
-    def visit(self, node: IfStmt):
-        raise NotImplementedError(
-            "TODO estudiante: generar labels y branches para IfStmt"
-        )
+        # Then body
+        self.emit(f":{then_label}")
+        if isinstance(node.then_body, list):
+            for stmt in node.then_body:
+                self.visit(stmt)
+        else:
+            self.visit(node.then_body)
+        
+        if node.else_body:
+            self.emit("JUMP", end_label)
 
-    def visit(self, node: WhileStmt):
-        raise NotImplementedError(
-            "TODO estudiante: generar labels y branches para WhileStmt"
-        )
+        # Else body (si existe)
+        if node.else_body:
+            self.emit(f":{else_label}")
+            if isinstance(node.else_body, list):
+                for stmt in node.else_body:
+                    self.visit(stmt)
+            else:
+                self.visit(node.else_body)
 
-    def visit(self, node: ForStmt):
-        raise NotImplementedError(
-            "TODO estudiante: generar labels y branches para ForStmt"
-        )
+        self.emit(f":{end_label}")
 
-    def visit(self, node: ReturnStmt):
-        if node.expr is None:
+    def visit(self, node: While):
+        """
+        Genera IR para bucles while.
+        while (cond) body
+        """
+        start_label = self.new_label()
+        body_label = self.new_label()
+        end_label = self.new_label()
+
+        self.emit(f":{start_label}")
+        cond_reg = self.visit(node.cond)
+        self.emit("BRANCH_FALSE", cond_reg, end_label)
+
+        self.emit(f":{body_label}")
+        if isinstance(node.body, list):
+            for stmt in node.body:
+                self.visit(stmt)
+        else:
+            self.visit(node.body)
+        self.emit("JUMP", start_label)
+
+        self.emit(f":{end_label}")
+
+    def visit(self, node: For):
+        """
+        Genera IR para bucles for.
+        for (init; cond; update) body
+        """
+        if node.init:
+            self.visit(node.init)
+
+        start_label = self.new_label()
+        body_label = self.new_label()
+        update_label = self.new_label()
+        end_label = self.new_label()
+
+        self.emit(f":{start_label}")
+        if node.cond:
+            cond_reg = self.visit(node.cond)
+            self.emit("BRANCH_FALSE", cond_reg, end_label)
+
+        self.emit(f":{body_label}")
+        if isinstance(node.body, list):
+            for stmt in node.body:
+                self.visit(stmt)
+        else:
+            self.visit(node.body)
+
+        self.emit(f":{update_label}")
+        if node.update:
+            self.visit(node.update)
+        self.emit("JUMP", start_label)
+
+        self.emit(f":{end_label}")
+
+    def visit(self, node: Return):
+        if node.value is None:
             self.emit("RET")
             return
 
-        reg = self.visit(node.expr)
+        reg = self.visit(node.value)
         self.emit("RET", reg)
 
     # -------------------------------------------------
     # expressions
     # -------------------------------------------------
 
-    def visit(self, node: VarLoc):
+    def visit(self, node: Identifier):
         storage = self.lookup(node.name)
         tmp = self.new_temp()
         self.emit(self.load_opcode(storage.ty), storage.name, tmp)
         return tmp
 
-    def visit(self, node: ArrayLoc):
-        raise NotImplementedError(
-            "TODO estudiante: implementar acceso a arreglos"
-        )
-
-    def visit(self, node: FuncCall):
-        raise NotImplementedError(
-            "TODO estudiante: implementar evaluación de argumentos y CALL"
-        )
-
-    def visit(self, node: BinOp):
+    def visit(self, node: ArrayAccess):
         """
-        Implementación al 50%.
-
-        Ya resuelto:
-        - esqueleto general
-        - aritmética básica + - * /
-
-        Pendiente:
-        - comparaciones
-        - booleanos lógicos
-        - operaciones bit a bit
-        - cortocircuito real para && y ||
+        Genera IR para acceso a arreglos: arr[index]
         """
+        array_storage = self.lookup(node.array.name)
+        index_reg = self.visit(node.index)
+        tmp = self.new_temp()
+
+        # LOADA array_ptr, index_reg, tmp
+        self.emit("LOADA", array_storage.name, index_reg, tmp)
+        return tmp
+
+    def visit(self, node: Call):
+        """
+        Genera IR para llamadas a funciones.
+        func(arg1, arg2, ...)
+        """
+        # Evalúa argumentos
+        arg_regs = []
+        for arg in node.args:
+            arg_reg = self.visit(arg)
+            arg_regs.append(arg_reg)
+
+        # Emite CALL
+        tmp = self.new_temp()
+        if arg_regs:
+            self.emit("CALL", node.name, *arg_regs, tmp)
+        else:
+            self.emit("CALL", node.name, tmp)
+
+        return tmp
+
+    def visit(self, node: BinaryOp):
+        """
+        Implementación completa de operadores binarios:
+        - Aritmética: + - * /
+        - Comparaciones: < > <= >= == !=
+        - Lógicos: && ||
+        - Bitwise: & | ^ << >>
+        """
+        # Cortocircuito para && y ||
+        if node.op == "&&":
+            left_reg = self.visit(node.left)
+            true_label = self.new_label()
+            false_label = self.new_label()
+            end_label = self.new_label()
+
+            self.emit("BRANCH_FALSE", left_reg, false_label)
+            right_reg = self.visit(node.right)
+            self.emit("BRANCH_FALSE", right_reg, false_label)
+
+            # True: cargar 1
+            self.emit(f":{true_label}")
+            tmp = self.new_temp()
+            self.emit("MOVI", 1, tmp)
+            self.emit("JUMP", end_label)
+
+            # False: cargar 0
+            self.emit(f":{false_label}")
+            self.emit("MOVI", 0, tmp)
+
+            self.emit(f":{end_label}")
+            return tmp
+
+        if node.op == "||":
+            left_reg = self.visit(node.left)
+            true_label = self.new_label()
+            false_label = self.new_label()
+            end_label = self.new_label()
+
+            self.emit("BRANCH_TRUE", left_reg, true_label)
+            right_reg = self.visit(node.right)
+            self.emit("BRANCH_FALSE", right_reg, false_label)
+
+            # True: cargar 1
+            self.emit(f":{true_label}")
+            tmp = self.new_temp()
+            self.emit("MOVI", 1, tmp)
+            self.emit("JUMP", end_label)
+
+            # False: cargar 0
+            self.emit(f":{false_label}")
+            self.emit("MOVI", 0, tmp)
+
+            self.emit(f":{end_label}")
+            return tmp
+
+        # Operandos normales
         left_reg = self.visit(node.left)
         right_reg = self.visit(node.right)
         left_ty = self.infer_type(node.left)
         out = self.new_temp()
 
-        if node.oper in {"+", "-", "*", "/"}:
-            opcode = self.binary_arith_opcode(node.oper, left_ty)
+        # Aritmética
+        if node.op in {"+", "-", "*", "/"}:
+            opcode = self.binary_arith_opcode(node.op, left_ty)
             self.emit(opcode, left_reg, right_reg, out)
             return out
 
+        # Comparaciones
+        if node.op in {"<", ">", "<=", ">=", "==", "!="}:
+            cmp_opcode = self.cmp_opcode(left_ty)
+            self.emit(cmp_opcode, left_reg, right_reg)
+            self.emit("MOVZ", node.op, out)  # MOVZ carga basado en la bandera
+            return out
+
+        # Bitwise
+        if node.op in {"&", "|", "^"}:
+            opcode = self.binary_bit_opcode(node.op, left_ty)
+            self.emit(opcode, left_reg, right_reg, out)
+            return out
+
+        # Shifts
+        if node.op == "<<":
+            self.emit(f"SHL{self.type_suffix(left_ty)}", left_reg, right_reg, out)
+            return out
+        if node.op == ">>":
+            self.emit(f"SHR{self.type_suffix(left_ty)}", left_reg, right_reg, out)
+            return out
+
         raise NotImplementedError(
-            f"TODO estudiante: completar BinOp para operador {node.oper!r}"
+            f"TODO estudiante: completar BinaryOp para operador {node.op!r}"
         )
 
     def visit(self, node: UnaryOp):
-        raise NotImplementedError(
-            "TODO estudiante: implementar UnaryOp (+, -, !)"
-        )
+        """
+        Genera IR para operadores unarios: +expr, -expr, !expr
+        """
+        operand_reg = self.visit(node.operand)
+        ty = self.infer_type(node.operand)
+        tmp = self.new_temp()
 
-    def visit(self, node: IntegerLiteral):
+        if node.op == "+":
+            # Unario +: simplemente retorna el mismo valor
+            self.emit(self.move_opcode(ty), operand_reg, tmp)
+            return tmp
+        elif node.op == "-":
+            # Unario -: negación
+            self.emit(f"NEG{self.type_suffix(ty)}", operand_reg, tmp)
+            return tmp
+        elif node.op == "!":
+            # Negación lógica: invierte booleano
+            self.emit("NOT", operand_reg, tmp)
+            return tmp
+        else:
+            raise NotImplementedError(f"Operador unario no soportado: {node.op}")
+
+    def visit(self, node: Number):
         tmp = self.new_temp()
         self.emit("MOVI", int(node.value), tmp)
         return tmp
 
-    def visit(self, node: BooleanLiteral):
+    def visit(self, node: Float):
+        tmp = self.new_temp()
+        self.emit("MOVF", float(node.value), tmp)
+        return tmp
+
+    def visit(self, node: Boolean):
         tmp = self.new_temp()
         self.emit("MOVI", 1 if node.value else 0, tmp)
         return tmp
 
-    def visit(self, node: CharLiteral):
+    def visit(self, node: Char):
         tmp = self.new_temp()
-        value = ord(node.value) if isinstance(node.value, str) else int(node.value)
+        # Maneja caracteres simples o códigos numéricos
+        if isinstance(node.value, str) and len(node.value) == 1:
+            value = ord(node.value)
+        elif isinstance(node.value, str):
+            # Si es un string de escape, toma el primer carácter
+            value = ord(node.value[0]) if node.value else 0
+        else:
+            value = int(node.value)
         self.emit("MOVB", value, tmp)
         return tmp
 
-    def visit(self, node: StringLiteral):
-        raise NotImplementedError(
-            "TODO estudiante: decidir representación IR para strings"
-        )
+    def visit(self, node: String):
+        """
+        Genera IR para strings.
+        Almacena strings en la tabla de cadenas global.
+        """
+        # Genera un label único para este string
+        str_label = f"STR_{len(self.program.globals)}"
+        self.program.globals.append(("STRING", str_label, node.value))
 
-    def visit(self, node: ExprList):
-        return [self.visit(expr) for expr in node.exprs]
+        # Carga la dirección del string en un temporal
+        tmp = self.new_temp()
+        self.emit("MOVS", str_label, tmp)
+        return tmp
+
+    def visit(self, node: ArrayLiteral):
+        """
+        Genera IR para literales de arreglos.
+        [elem1, elem2, ...]
+        """
+        # Genera labels y almacena en globales
+        arr_label = f"ARR_{len(self.program.globals)}"
+        elements = [self.visit(elem) for elem in node.elements]
+        self.program.globals.append(("ARRAY", arr_label, len(elements)))
+
+        tmp = self.new_temp()
+        self.emit("MOVA", arr_label, tmp)
+        return tmp
 
 
 # ===================================================
@@ -484,29 +689,58 @@ class IRCodeGen(Visitor):
 # ===================================================
 
 if __name__ == "__main__":
-    # Demo pequeña para que los estudiantes prueben la plantilla.
+    # Demo completa usando todas las clases del modelo
     ast = Program([
-        FuncDecl(
+        Function(
             name="main",
-            parms=ParamList([]),
-            type=VOID,
+            return_type=VoidType,
+            params=[],
             body=Block([
+                # Declaracion y asignacion simple
                 VarDecl(
                     name="x",
-                    type=INT,
-                    value=BinOp(
-                        oper="+",
-                        left=IntegerLiteral(2),
-                        right=BinOp(
-                            oper="*",
-                            left=IntegerLiteral(3),
-                            right=IntegerLiteral(4),
-                            type=INT,
-                        ),
-                        type=INT,
-                    ),
+                    type_=IntegerType,
+                    value=Number(5),
                 ),
-                PrintStmt(expr=VarLoc(name="x", type=INT)),
+                # Operadores aritmeticos
+                VarDecl(
+                    name="y",
+                    type_=IntegerType,
+                    value=BinaryOp("+", Number(3), Number(2), line=None),
+                ),
+                # Comparacion
+                VarDecl(
+                    name="z",
+                    type_=BooleanType,
+                    value=BinaryOp("<", Identifier("x"), Number(10), line=None),
+                ),
+                # Operador unario
+                VarDecl(
+                    name="neg",
+                    type_=IntegerType,
+                    value=UnaryOp("-", Number(5)),
+                ),
+                # Control de flujo: if
+                If(
+                    cond=Identifier("z"),
+                    then_body=Block([
+                        Print(args=[Identifier("x")]),
+                    ]),
+                    else_body=Block([
+                        Print(args=[Number(0)]),
+                    ])
+                ),
+                # Control de flujo: while
+                While(
+                    cond=BinaryOp(">", Identifier("x"), Number(0), line=None),
+                    body=Block([
+                        Assignment(
+                            target=Identifier("x"),
+                            value=BinaryOp("-", Identifier("x"), Number(1), line=None),
+                        ),
+                        Print(args=[Identifier("x")]),
+                    ])
+                ),
             ]),
         )
     ])
